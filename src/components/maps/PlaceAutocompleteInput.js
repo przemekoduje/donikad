@@ -38,5 +38,5 @@ export default function PlaceAutocompleteInput({ placeholder = "Podaj miejsce...
     };
   }, [placeholder, onPlaceSelected]);
 
-  return <div ref={ref} style={{ minHeight: 40, width: "100%" }} />;
+  return <div ref={ref} style={{ minHeight: 400, width: "100%" }} />;
 }

@@ -6,7 +6,7 @@ const containerStyle = { width: "100%", height: "400px" };
 const defaultCenter = { lat: 50.2945, lng: 18.6714 };
 const libraries = ["places"];
 
-// Komponent pojedynczego pola adresu: działa jako PlaceAutocompleteBox albo fallback-input
+// Komponent pojedynczego pola adresu
 function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
   const ref = useRef(null);
   const elementRef = useRef(null);
@@ -14,10 +14,6 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
   const [manualAddress, setManualAddress] = useState("");
   const [isGeocoding, setIsGeocoding] = useState(false);
 
-
-
-
-  // Sprawdź czy webcomponent jest dostępny (tylko po załadowaniu window.google)
   useEffect(() => {
     const check = () => {
       if (
@@ -27,7 +23,6 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
         ref.current &&
         !elementRef.current
       ) {
-        // Test czy webcomponent jest zarejestrowany
         const available = !!window.customElements.get("gmpx-place-autocomplete");
         if (available) {
           const element = document.createElement("gmpx-place-autocomplete");
@@ -48,11 +43,9 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
 
           return;
         }
-        // Jeśli nie ma webcomponentu — fallback!
         setFallback(true);
       }
     };
-    // Odczekaj, bo czasem google jest ładowane asynchronicznie
     const timer = setTimeout(check, 400);
     return () => {
       clearTimeout(timer);
@@ -63,7 +56,6 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
     };
   }, [onPlaceSelected, placeholder]);
 
-  // Ręczne geokodowanie dla fallback-input
   const handleGeocode = async () => {
     if (!manualAddress) return;
     setIsGeocoding(true);
@@ -77,7 +69,6 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
         resp.data.results[0].geometry
       ) {
         const result = resp.data.results[0];
-        // Podaj w "syntetycznym" formacie podobnym do Place
         onPlaceSelected({
           formatted_address: result.formatted_address,
           geometry: {
@@ -96,7 +87,6 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
     setIsGeocoding(false);
   };
 
-  // Jeśli fallback — pokazujemy input + przycisk "Szukaj"
   if (fallback) {
     return (
       <div style={{ width: 240 }}>
@@ -119,7 +109,6 @@ function PlaceInputWithFallback({ onPlaceSelected, placeholder }) {
     );
   }
 
-  // Wersja z webcomponentem
   return <div ref={ref} />;
 }
 
@@ -127,15 +116,13 @@ export default function RouteMap() {
   const [origin, setOrigin] = useState(null);
   const [destination, setDestination] = useState(null);
   const [directions, setDirections] = useState(null);
-  const [towns, setTowns] = useState([]);
   const [loading, setLoading] = useState(false);
   const [directionsRequest, setDirectionsRequest] = useState(null);
+  const [osmTowns, setOsmTowns] = useState([]);
 
-  // Odczytaj współrzędne z obiektu place (API gmpx lub fallback)
   const extractCoords = (place) => {
     if (place && place.geometry && place.geometry.location) {
       const loc = place.geometry.location;
-      // location może być funkcją (webcomponent) lub liczbą (fallback)
       return {
         lat: typeof loc.lat === "function" ? loc.lat() : loc.lat,
         lng: typeof loc.lng === "function" ? loc.lng() : loc.lng,
@@ -148,8 +135,8 @@ export default function RouteMap() {
   const handleSetOrigin = (place) => {
     const coords = extractCoords(place);
     setOrigin(coords);
-    setDirections(null); // Resetuj trasę, gdy zmieniasz punkt!
-    setTowns([]);
+    setDirections(null);
+    setOsmTowns([]);
     if (coords && destination) {
       setDirectionsRequest({
         origin: coords,
@@ -162,7 +149,7 @@ export default function RouteMap() {
     const coords = extractCoords(place);
     setDestination(coords);
     setDirections(null);
-    setTowns([]);
+    setOsmTowns([]);
     if (origin && coords) {
       setDirectionsRequest({
         origin,
@@ -172,44 +159,63 @@ export default function RouteMap() {
     }
   };
 
-  const shouldShowDirections = origin && destination;
+  // Helper: wybiera co N-ty punkt z polyline
+  function selectEveryNth(arr, n) {
+    return arr.filter((_, idx) => idx % n === 0);
+  }
 
+  // OSM: pobierz miejscowości dla punktu
+  async function getNearbyTowns(lat, lng, radius = 30000) {
+    const query = `
+    [out:json][timeout:25];
+    (
+      node["place"~"city|town|village|hamlet"](around:${radius},${lat},${lng});
+    );
+    out body;
+  `;
+    const url = "https://overpass-api.de/api/interpreter";
+    const resp = await axios.post(url, query, { headers: { 'Content-Type': 'text/plain' } });
+    if (resp.data && resp.data.elements) {
+      return resp.data.elements.map(el => ({
+        id: el.id,
+        name: el.tags.name,
+        lat: el.lat,
+        lng: el.lon,
+        type: el.tags.place,
+      }));
+    }
+    return [];
+  }
+
+  // OSM: pobierz miejscowości dla całej trasy
+  async function getAllNearbyTownsAlongRoute(points) {
+    let allTowns = [];
+    for (let pt of points) {
+      const towns = await getNearbyTowns(pt.lat, pt.lng, 30000);
+      allTowns = allTowns.concat(towns);
+      // await new Promise(r => setTimeout(r, 250)); // Możesz dodać throttling!
+    }
+    const uniqueTowns = Array.from(new Map(allTowns.map(item => [item.name, item])).values());
+    return uniqueTowns;
+  }
+
+  // Callback DirectionsService (z OSM towns)
   const handleDirectionsCallback = async (res) => {
     if (res !== null && res.status === "OK") {
       setDirections(res);
       setDirectionsRequest(null);
       setLoading(true);
 
-      const steps = res.routes[0].legs[0].steps;
-      const stepIndexes = Array.from({ length: steps.length }, (_, i) => i).filter(i => i % 5 === 0 || i === steps.length - 1);
-      const points = stepIndexes.map(i => steps[i].end_location);
+      // Wydziel punkty polyline co 10 fragmentów
+      const polylinePoints = res.routes[0].overview_path.map(latlng => ({
+        lat: typeof latlng.lat === "function" ? latlng.lat() : latlng.lat,
+        lng: typeof latlng.lng === "function" ? latlng.lng() : latlng.lng,
+      }));
+      const queryPoints = selectEveryNth(polylinePoints, Math.floor(polylinePoints.length / 10) || 1);
 
-      const townsArr = [];
-      for (let pt of points) {
-        try {
-          const lat = typeof pt.lat === "function" ? pt.lat() : pt.lat;
-          const lng = typeof pt.lng === "function" ? pt.lng() : pt.lng;
-          const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${process.env.REACT_APP_GOOGLE_MAPS_API_KEY}&language=pl`;
-          const resp = await axios.get(url);
-          const cityResult = resp.data.results.find(r =>
-            r.types.includes("locality") ||
-            r.types.includes("administrative_area_level_2") ||
-            r.types.includes("postal_town")
-          );
-          if (cityResult) {
-            const component = cityResult.address_components.find(c =>
-              c.types.includes("locality") ||
-              c.types.includes("administrative_area_level_2") ||
-              c.types.includes("postal_town")
-            );
-            if (component) townsArr.push(component.long_name);
-          }
-        } catch (e) {
-          // Możesz logować błędy geokodowania jeśli chcesz
-        }
-      }
-      const uniqueTowns = [...new Set(townsArr.filter(Boolean))];
-      setTowns(uniqueTowns);
+      // Pobierz miejscowości OSM (asynchronicznie)
+      const uniqueTowns = await getAllNearbyTownsAlongRoute(queryPoints);
+      setOsmTowns(uniqueTowns);
       setLoading(false);
     }
   };
@@ -231,7 +237,6 @@ export default function RouteMap() {
             onPlaceSelected={handleSetDestination}
           />
         </div>
-
         <GoogleMap
           mapContainerStyle={containerStyle}
           center={origin || defaultCenter}
@@ -243,20 +248,27 @@ export default function RouteMap() {
               callback={handleDirectionsCallback}
             />
           )}
-
           {directions && <DirectionsRenderer directions={directions} />}
         </GoogleMap>
         <div style={{ marginTop: 20, background: "#f6f7fa", padding: 18, borderRadius: 12, minHeight: 80 }}>
-          <h3 style={{ marginTop: 0 }}>Miejscowości na trasie:</h3>
+          <h3 style={{ marginTop: 0 }}>Miejscowości w promieniu 30 km od trasy:</h3>
           {loading && <span>Wyszukuję miejscowości...</span>}
-          {!loading && towns.length > 0 && (
+          {!loading && osmTowns.length > 0 && (
             <ul>
-              {towns.map((town, idx) => (
-                <li key={idx}>{town}</li>
+              {osmTowns.map((town) => (
+                <li key={town.id}>
+                  <a
+                    href={`https://www.openstreetmap.org/?mlat=${town.lat}&mlon=${town.lng}#map=11/${town.lat}/${town.lng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {town.name} ({town.type})
+                  </a>
+                </li>
               ))}
             </ul>
           )}
-          {!loading && towns.length === 0 && shouldShowDirections && (
+          {!loading && osmTowns.length === 0 && (
             <span>Brak danych lub nie wyznaczono trasy.</span>
           )}
         </div>
